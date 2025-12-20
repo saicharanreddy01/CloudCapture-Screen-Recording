@@ -1,0 +1,9 @@
+{
+  "name": "CloudCapture AI",
+  "description": "A high-performance screen recording application that uses Gemini AI to analyze recordings and simulates automatic saving to Google Drive.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "display-capture"
+  ]
+}
