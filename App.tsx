@@ -41,18 +41,24 @@ const App: React.FC = () => {
   const timerIntervalRef = useRef<number | null>(null);
   const cancelRef = useRef<boolean>(false);
 
-  // Persistence and Routing
+  // Sync recordings with the Vault whenever they change
   useEffect(() => {
-    // Load recordings
-    const saved = localStorage.getItem('cc_recordings');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      // Re-convert base64 strings back to Blobs for current session if needed
-      // (Note: For this demo, we store the metadata and assume the Blob URL is generated on-demand)
-      setRecordings(parsed);
+    if (settings.isAuthenticated && settings.userEmail) {
+      const vault = JSON.parse(localStorage.getItem('cc_user_vault') || '[]');
+      const userIndex = vault.findIndex((u: any) => u.email === settings.userEmail);
+      if (userIndex !== -1) {
+        vault[userIndex].recordings = recordings;
+        localStorage.setItem('cc_user_vault', JSON.stringify(vault));
+      }
     }
+  }, [recordings, settings.isAuthenticated, settings.userEmail]);
 
-    // Check for shared link
+  useEffect(() => {
+    localStorage.setItem('cc_settings', JSON.stringify(settings));
+  }, [settings]);
+
+  // Handle shared link on mount
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const videoId = params.get('v');
     if (videoId) {
@@ -60,22 +66,21 @@ const App: React.FC = () => {
     }
   }, []);
 
-  useEffect(() => {
-    localStorage.setItem('cc_recordings', JSON.stringify(recordings));
-  }, [recordings]);
-
-  useEffect(() => {
-    localStorage.setItem('cc_settings', JSON.stringify(settings));
-  }, [settings]);
-
   const handleLogin = (name: string, email: string, avatar: string) => {
-    setSettings(prev => ({
-      ...prev,
-      userName: name,
-      userEmail: email,
-      userAvatar: avatar,
-      isAuthenticated: true
-    }));
+    // When logging in, find user in vault and load their recordings
+    const vault = JSON.parse(localStorage.getItem('cc_user_vault') || '[]');
+    const user = vault.find((u: any) => u.email === email);
+    
+    if (user) {
+      setRecordings(user.recordings || []);
+      setSettings(prev => ({
+        ...prev,
+        userName: name,
+        userEmail: email,
+        userAvatar: avatar,
+        isAuthenticated: true
+      }));
+    }
   };
 
   const handleLogout = () => {
@@ -86,6 +91,7 @@ const App: React.FC = () => {
       userAvatar: "",
       isAuthenticated: false
     }));
+    setRecordings([]);
     setActiveSection('recordings');
   };
 
@@ -209,7 +215,7 @@ const App: React.FC = () => {
       const analysis = await analyzeRecording(thumbnail.split(',')[1]);
 
       if (settings.autoSync) {
-        setProcessingStep(`Syncing to ${settings.cloudStorage === 'google-drive' ? 'Google Drive' : settings.cloudStorage}...`);
+        setProcessingStep(`Syncing to Google Drive Vault...`);
         await new Promise(r => setTimeout(r, 1500));
       }
 
@@ -254,10 +260,10 @@ const App: React.FC = () => {
             {appState === RecordingState.IDLE && (
               <section className="mb-16 text-center">
                 <h2 className="text-5xl font-black mb-6 gradient-text tracking-tighter">
-                  Cloud-Native Capture.
+                  Secure Workspace Active.
                 </h2>
                 <p className="text-slate-400 max-w-2xl mx-auto text-xl font-light leading-relaxed">
-                  Welcome back, {settings.userName}. Your workspace is connected to your secure cloud node.
+                  Welcome back, {settings.userName}. Your private vault is locked and loaded.
                 </p>
               </section>
             )}
@@ -314,11 +320,11 @@ const App: React.FC = () => {
 
                   <div className="text-center">
                     <p className="text-slate-300 font-bold text-lg mb-1">
-                      {appState === RecordingState.IDLE ? "System Idle" : 
+                      {appState === RecordingState.IDLE ? "Protected Node Ready" : 
                        appState === RecordingState.RECORDING ? "Capture in Progress" : "Workflow Automation"}
                     </p>
                     <p className="text-slate-500 text-sm">
-                      {appState === RecordingState.IDLE ? "Start session to begin auto-sync" : 
+                      {appState === RecordingState.IDLE ? "Session recording is private to your vault" : 
                        appState === RecordingState.RECORDING ? "Screen, Mic, and System Audio Active" : "Finalizing cloud synchronization"}
                     </p>
                   </div>
@@ -329,11 +335,11 @@ const App: React.FC = () => {
             <div className="mt-12">
               <div className="flex items-center justify-between mb-10">
                 <h3 className="text-3xl font-black flex items-center gap-4 tracking-tighter">
-                  <i className="fa-solid fa-folder-open text-blue-500"></i>
-                  Recent Vault
+                  <i className="fa-solid fa-vault text-blue-500"></i>
+                  Your Private Assets
                 </h3>
                 <span className="text-slate-500 text-xs font-black uppercase tracking-widest glass-panel px-4 py-2 rounded-full">
-                  {recordings.length} Protected Items
+                  {recordings.length} Saved Records
                 </span>
               </div>
 
@@ -342,7 +348,7 @@ const App: React.FC = () => {
                   <div className="w-24 h-24 bg-slate-900/50 rounded-full flex items-center justify-center mx-auto mb-8 text-slate-700 border border-slate-800 transition-transform hover:scale-110">
                     <i className="fa-solid fa-ghost text-4xl opacity-50"></i>
                   </div>
-                  <h4 className="text-xl font-bold text-slate-400">Library is Empty</h4>
+                  <h4 className="text-xl font-bold text-slate-400">Vault is Empty</h4>
                   <p className="text-slate-600 mt-2">Recorded assets will appear here.</p>
                 </div>
               ) : (
@@ -364,9 +370,18 @@ const App: React.FC = () => {
     }
   };
 
+  // Shared Link Public Router
   if (sharedViewId) {
-    const video = recordings.find(r => r.id === sharedViewId);
-    return <PublicVideoView video={video} onClose={() => {
+    // For shared view, we search across ALL users in the vault to find the public link
+    const vault = JSON.parse(localStorage.getItem('cc_user_vault') || '[]');
+    let sharedVideo: Recording | undefined;
+    
+    for (const user of vault) {
+      sharedVideo = user.recordings.find((r: Recording) => r.id === sharedViewId);
+      if (sharedVideo) break;
+    }
+
+    return <PublicVideoView video={sharedVideo} onClose={() => {
       setSharedViewId(null);
       window.history.pushState({}, '', window.location.pathname);
     }} />;
@@ -432,7 +447,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="py-12 border-t border-slate-900 text-center text-slate-600">
-        <p className="text-xs font-bold uppercase tracking-[0.3em] opacity-50">CloudCapture AI v2.7 • Secure Node Connected</p>
+        <p className="text-xs font-bold uppercase tracking-[0.3em] opacity-50">CloudCapture AI Node • Vault Encryption v4.1</p>
       </footer>
     </div>
   );
