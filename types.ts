@@ -20,7 +20,7 @@ export enum RecordingState {
   PROCESSING = 'PROCESSING'
 }
 
-export type AppSection = 'recordings' | 'shared' | 'settings';
+export type AppSection = 'recordings' | 'assessment' | 'shared' | 'settings';
 
 export interface UserSettings {
   userName: string;

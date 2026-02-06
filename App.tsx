@@ -37,9 +37,12 @@ const App: React.FC = () => {
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<number | null>(null);
   const cancelRef = useRef<boolean>(false);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const requestRef = useRef<number | null>(null);
 
   // Sync recordings with the Vault whenever they change
   useEffect(() => {
@@ -67,7 +70,6 @@ const App: React.FC = () => {
   }, []);
 
   const handleLogin = (name: string, email: string, avatar: string) => {
-    // When logging in, find user in vault and load their recordings
     const vault = JSON.parse(localStorage.getItem('cc_user_vault') || '[]');
     const user = vault.find((u: any) => u.email === email);
     
@@ -106,6 +108,132 @@ const App: React.FC = () => {
     if (timerIntervalRef.current) {
       clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
+    }
+  };
+
+  const startAssessmentRecording = async () => {
+    try {
+      const resMap = { '720p': { w: 1280, h: 720 }, '1080p': { w: 1920, h: 1080 }, '4k': { w: 3840, h: 2160 } };
+      const dim = resMap[settings.resolution];
+
+      // 1. Capture Screen
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { 
+          frameRate: { ideal: settings.frameRate }, 
+          width: { ideal: dim.w }, 
+          height: { ideal: dim.h } 
+        },
+        audio: true
+      });
+
+      // 2. Capture Camera & Mic
+      const camStream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 480, height: 270, frameRate: 30 },
+        audio: true
+      });
+      cameraStreamRef.current = camStream;
+
+      // 3. Setup Canvas for Overlay
+      const canvas = document.createElement('canvas');
+      canvas.width = dim.w;
+      canvas.height = dim.h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error("Canvas context failed");
+
+      const screenVideo = document.createElement('video');
+      screenVideo.srcObject = screenStream;
+      screenVideo.play();
+
+      const camVideo = document.createElement('video');
+      camVideo.srcObject = camStream;
+      camVideo.play();
+
+      // Audio Mixing
+      const audioCtx = new AudioContext();
+      const dest = audioCtx.createMediaStreamDestination();
+      
+      const screenSource = audioCtx.createMediaStreamSource(screenStream);
+      const camSource = audioCtx.createMediaStreamSource(camStream);
+      
+      screenSource.connect(dest);
+      camSource.connect(dest);
+
+      const drawOverlay = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Draw Screen
+        ctx.drawImage(screenVideo, 0, 0, canvas.width, canvas.height);
+        
+        // Draw Camera (Bottom Right)
+        const camW = canvas.width * 0.2;
+        const camH = (camW * camVideo.videoHeight) / camVideo.videoWidth || (camW * 9 / 16);
+        const margin = 20;
+        const camX = canvas.width - camW - margin;
+        const camY = canvas.height - camH - margin;
+
+        // Mask for rounded corners
+        ctx.save();
+        ctx.beginPath();
+        const radius = 20;
+        ctx.moveTo(camX + radius, camY);
+        ctx.lineTo(camX + camW - radius, camY);
+        ctx.quadraticCurveTo(camX + camW, camY, camX + camW, camY + radius);
+        ctx.lineTo(camX + camW, camY + camH - radius);
+        ctx.quadraticCurveTo(camX + camW, camY + camH, camX + camW - radius, camY + camH);
+        ctx.lineTo(camX + radius, camY + camH);
+        ctx.quadraticCurveTo(camX, camY + camH, camX, camY + camH - radius);
+        ctx.lineTo(camX, camY + radius);
+        ctx.quadraticCurveTo(camX, camY, camX + radius, camY);
+        ctx.closePath();
+        ctx.clip();
+        
+        ctx.drawImage(camVideo, camX, camY, camW, camH);
+        ctx.restore();
+
+        // Optional: Border for cam
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        requestRef.current = requestAnimationFrame(drawOverlay);
+      };
+
+      drawOverlay();
+
+      const canvasStream = canvas.captureStream(settings.frameRate);
+      const combinedTracks = [...canvasStream.getVideoTracks(), ...dest.stream.getAudioTracks()];
+      const finalStream = new MediaStream(combinedTracks);
+      
+      streamRef.current = finalStream;
+      const options = { mimeType: 'video/webm;codecs=vp9,opus', videoBitsPerSecond: 8000000 };
+      const recorder = new MediaRecorder(finalStream, options);
+      
+      mediaRecorderRef.current = recorder;
+      chunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = () => {
+        if (requestRef.current) cancelAnimationFrame(requestRef.current);
+        const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+        setCurrentRecordingBlob(blob);
+        setAppState(RecordingState.EDITING);
+        stopTimer();
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        cameraStreamRef.current?.getTracks().forEach(t => t.stop());
+      };
+
+      recorder.start();
+      setAppState(RecordingState.RECORDING);
+      setTimer(0);
+      startTimer();
+
+      screenStream.getVideoTracks()[0].onended = () => stopRecording();
+
+    } catch (err) {
+      console.error("Assessment Recording Error:", err);
+      alert("Permission denied or capture failed.");
     }
   };
 
@@ -163,7 +291,7 @@ const App: React.FC = () => {
 
     } catch (err) {
       console.error("Error accessing media devices:", err);
-      alert("Failed to start recording. Please ensure display capture permissions are granted.");
+      alert("Failed to start recording.");
     }
   };
 
@@ -171,6 +299,7 @@ const App: React.FC = () => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
       streamRef.current?.getTracks().forEach(track => track.stop());
+      cameraStreamRef.current?.getTracks().forEach(track => track.stop());
     }
   };
 
@@ -180,6 +309,7 @@ const App: React.FC = () => {
     setTimer(0);
     setCurrentRecordingBlob(null);
     setProcessingStep("");
+    if (requestRef.current) cancelAnimationFrame(requestRef.current);
   };
 
   const finalizeRecording = async (finalBlob: Blob, finalDuration: number) => {
@@ -227,7 +357,7 @@ const App: React.FC = () => {
         blob: finalBlob,
         duration: Math.round(finalDuration),
         timestamp: Date.now(),
-        title: analysis.title,
+        title: activeSection === 'assessment' ? `Assessment: ${analysis.title}` : analysis.title,
         description: analysis.summary,
         status: 'saved',
         driveUrl: `https://drive.google.com/drive/recent`,
@@ -242,7 +372,7 @@ const App: React.FC = () => {
 
     } catch (e) {
       console.error("Finalization error:", e);
-      alert("Something went wrong during processing. Your recording was saved locally.");
+      alert("Recording saved locally.");
       setAppState(RecordingState.IDLE);
     }
   };
@@ -253,6 +383,65 @@ const App: React.FC = () => {
         return <SettingsSection key="settings" settings={settings} onSettingsChange={setSettings} onLogout={handleLogout} />;
       case 'shared':
         return <SharedSection key="shared" recordings={recordings} />;
+      case 'assessment':
+        return (
+          <div key="assessment" className="animate-section-in">
+             <section className="mb-12 text-center">
+                <h2 className="text-4xl font-black mb-4 gradient-text tracking-tighter">
+                  Assessment Mode
+                </h2>
+                <p className="text-slate-400 max-w-xl mx-auto text-sm font-medium">
+                  Capture your screen with a face-cam overlay and synchronized microphone audio. 
+                  Perfect for presentations, code reviews, and remote tests.
+                </p>
+              </section>
+
+              <div className="max-w-2xl mx-auto">
+                <div className="glass-panel rounded-[2.5rem] p-12 border border-blue-500/20 shadow-2xl relative overflow-hidden">
+                  <div className="flex flex-col items-center gap-10">
+                    {appState === RecordingState.RECORDING ? (
+                      <div className="flex flex-col items-center gap-6">
+                         <div className="relative group">
+                            <video 
+                              autoPlay 
+                              muted 
+                              ref={v => { if (v) v.srcObject = cameraStreamRef.current }} 
+                              className="w-48 h-48 rounded-full object-cover border-4 border-blue-500/30 shadow-2xl scale-x-[-1]"
+                            />
+                            <div className="absolute inset-0 rounded-full border-4 border-red-500/50 recording-pulse pointer-events-none"></div>
+                         </div>
+                         <button
+                            onClick={stopRecording}
+                            className="px-10 py-4 bg-red-600 hover:bg-red-500 text-white rounded-2xl font-black shadow-xl shadow-red-600/20 transition-all btn-haptic flex items-center gap-3"
+                          >
+                            <i className="fa-solid fa-square"></i>
+                            End Assessment
+                          </button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center gap-8">
+                        <div className="w-24 h-24 bg-blue-600/10 rounded-[2rem] flex items-center justify-center border border-blue-500/20">
+                          <i className="fa-solid fa-id-card-clip text-blue-500 text-4xl"></i>
+                        </div>
+                        <div className="text-center">
+                          <p className="text-white font-bold text-xl mb-2">Initialize Proctoring Suite</p>
+                          <p className="text-slate-500 text-sm max-w-xs mx-auto leading-relaxed">System will request screen, camera, and microphone permissions simultaneously.</p>
+                        </div>
+                        <button
+                          onClick={startAssessmentRecording}
+                          disabled={appState !== RecordingState.IDLE}
+                          className="px-12 py-5 bg-blue-600 hover:bg-blue-500 text-white rounded-[1.8rem] font-black shadow-2xl shadow-blue-600/30 transition-all btn-haptic flex items-center gap-3 group"
+                        >
+                          <i className="fa-solid fa-video group-hover:scale-110 transition-transform"></i>
+                          Launch Assessment
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+          </div>
+        )
       case 'recordings':
       default:
         return (
@@ -325,7 +514,7 @@ const App: React.FC = () => {
                     </p>
                     <p className="text-slate-500 text-sm">
                       {appState === RecordingState.IDLE ? "Session recording is private to your vault" : 
-                       appState === RecordingState.RECORDING ? "Screen, Mic, and System Audio Active" : "Finalizing cloud synchronization"}
+                       appState === RecordingState.RECORDING ? "Screen capture active" : "Finalizing cloud synchronization"}
                     </p>
                   </div>
                 </div>
@@ -370,17 +559,13 @@ const App: React.FC = () => {
     }
   };
 
-  // Shared Link Public Router
   if (sharedViewId) {
-    // For shared view, we search across ALL users in the vault to find the public link
     const vault = JSON.parse(localStorage.getItem('cc_user_vault') || '[]');
     let sharedVideo: Recording | undefined;
-    
     for (const user of vault) {
       sharedVideo = user.recordings.find((r: Recording) => r.id === sharedViewId);
       if (sharedVideo) break;
     }
-
     return <PublicVideoView video={sharedVideo} onClose={() => {
       setSharedViewId(null);
       window.history.pushState({}, '', window.location.pathname);
@@ -400,6 +585,36 @@ const App: React.FC = () => {
         userAvatar={settings.userAvatar}
       />
       
+      {/* Assessment UI Overlays */}
+      {appState === RecordingState.RECORDING && activeSection === 'assessment' && (
+        <div className="fixed inset-0 pointer-events-none z-[60]">
+           {/* Top Timer */}
+           <div className="absolute top-8 left-1/2 -translate-x-1/2 px-8 py-3 bg-white/10 backdrop-blur-3xl border border-white/20 rounded-2xl shadow-[0_0_40px_rgba(0,0,0,0.5)]">
+              <span className="font-mono text-3xl font-black text-white tracking-tighter">
+                {formatTime(timer)}
+              </span>
+              <div className="flex items-center justify-center gap-1.5 mt-1">
+                 <div className="w-1.5 h-1.5 rounded-full bg-red-500 recording-pulse"></div>
+                 <span className="text-[9px] font-black uppercase tracking-widest text-red-500">Proctored Session</span>
+              </div>
+           </div>
+
+           {/* Camera Preview */}
+           <div className="absolute bottom-10 right-10 w-64 aspect-video rounded-3xl overflow-hidden border-2 border-blue-500/50 shadow-2xl bg-black/40 backdrop-blur-md">
+              <video 
+                autoPlay 
+                muted 
+                ref={v => { if (v) v.srcObject = cameraStreamRef.current }} 
+                className="w-full h-full object-cover scale-x-[-1]"
+              />
+              <div className="absolute top-3 left-3 flex items-center gap-2">
+                 <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_10px_#3b82f6]"></div>
+                 <span className="text-[10px] font-black uppercase text-blue-500">Cam Active</span>
+              </div>
+           </div>
+        </div>
+      )}
+
       <main className="flex-grow container mx-auto px-4 py-12 overflow-hidden">
         {appState === RecordingState.EDITING && currentRecordingBlob ? (
           <VideoEditor 
@@ -410,7 +625,6 @@ const App: React.FC = () => {
         ) : renderSectionContent()}
       </main>
 
-      {/* Video Preview Modal */}
       {selectedVideo && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-950/95 backdrop-blur-2xl animate-in fade-in duration-300">
           <div className="relative w-full max-w-6xl glass-panel rounded-[2.5rem] border border-slate-800 overflow-hidden shadow-2xl animate-in zoom-in duration-300">
@@ -430,9 +644,10 @@ const App: React.FC = () => {
               <a 
                 href={selectedVideo.url} 
                 download={`${selectedVideo.title}.webm`} 
-                className="px-8 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-2xl font-bold border border-slate-700 transition-all btn-haptic"
+                className="px-8 py-3 bg-white text-slate-950 hover:bg-slate-100 rounded-2xl font-black transition-all btn-haptic flex items-center gap-2"
               >
-                Download
+                <i className="fa-solid fa-download"></i>
+                Download High Quality
               </a>
               <a 
                 href={selectedVideo.driveUrl} 
@@ -447,7 +662,7 @@ const App: React.FC = () => {
       )}
 
       <footer className="py-12 border-t border-slate-900 text-center text-slate-600">
-        <p className="text-xs font-bold uppercase tracking-[0.3em] opacity-50">CloudCapture AI Node • Vault Encryption v4.1</p>
+        <p className="text-xs font-bold uppercase tracking-[0.3em] opacity-50">CloudCapture AI Node • Assessment Suite v1.0</p>
       </footer>
     </div>
   );

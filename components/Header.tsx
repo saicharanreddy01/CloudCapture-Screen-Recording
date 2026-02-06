@@ -25,18 +25,18 @@ const Header: React.FC<HeaderProps> = ({ activeSection, onSectionChange, userNam
           </h1>
         </div>
         
-        <nav className="hidden md:flex items-center gap-1 bg-slate-900/50 p-1 rounded-2xl border border-slate-800">
-          {(['recordings', 'shared', 'settings'] as AppSection[]).map((section) => (
+        <nav className="hidden md:flex items-center gap-1 bg-slate-900/50 p-1 rounded-2xl border border-slate-800 overflow-x-auto">
+          {(['recordings', 'assessment', 'shared', 'settings'] as AppSection[]).map((section) => (
             <button 
               key={section}
               onClick={() => onSectionChange(section)}
-              className={`px-6 py-2 rounded-xl transition-all duration-300 text-xs font-black uppercase tracking-widest btn-haptic ${
+              className={`px-6 py-2 rounded-xl transition-all duration-300 text-[10px] font-black uppercase tracking-widest whitespace-nowrap btn-haptic ${
                 activeSection === section 
                 ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
                 : 'text-slate-500 hover:text-slate-200 hover:bg-slate-800'
               }`}
             >
-              {section}
+              {section === 'assessment' ? 'Assessment Recorder' : section}
             </button>
           ))}
         </nav>
